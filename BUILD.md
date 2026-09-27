@@ -118,28 +118,28 @@ This compiles a release binary and generates platform-specific bundles (deb, rpm
 
 ## Linux Install (from source)
 
-The raw binary (`src-tauri/target/release/handy`) cannot run standalone — it needs Tauri resource files (tray icons, sounds, VAD model) to be co-located at the expected path.
+The raw binary (`src-tauri/target/release/verbatap`) cannot run standalone — it needs Tauri resource files (tray icons, sounds, VAD model) to be co-located at the expected path.
 
 **Install from the deb bundle** (works on any Linux distro):
 
 ```bash
 cd /tmp
-ar x /path/to/Handy/src-tauri/target/release/bundle/deb/Handy_*_amd64.deb data.tar.gz
+ar x /path/to/VerbaTap/src-tauri/target/release/bundle/deb/VerbaTap_*_amd64.deb data.tar.gz
 tar xzf data.tar.gz
-sudo cp usr/bin/handy /usr/bin/
+sudo cp usr/bin/verbatap /usr/bin/
 sudo cp -a usr/lib/. /usr/lib/
 sudo cp -r usr/share/icons/hicolor/* /usr/share/icons/hicolor/
-sudo cp usr/share/applications/Handy.desktop /usr/share/applications/
+sudo cp usr/share/applications/VerbaTap.desktop /usr/share/applications/
 ```
 
-The runtime libraries live in the app-private `/usr/lib/Handy/` (on the binary's rpath), so no `ldconfig` step is needed.
+The runtime libraries live in the app-private `/usr/lib/VerbaTap/` (on the binary's rpath), so no `ldconfig` step is needed.
 
 After subsequent rebuilds, copy the binary and any refreshed runtime libraries:
 
 ```bash
-sudo cp src-tauri/target/release/handy /usr/bin/
-sudo mkdir -p /usr/lib/Handy
-sudo cp -a src-tauri/transcribe-libs/. /usr/lib/Handy/
+sudo cp src-tauri/target/release/verbatap /usr/bin/
+sudo mkdir -p /usr/lib/VerbaTap
+sudo cp -a src-tauri/transcribe-libs/. /usr/lib/VerbaTap/
 ```
 
 Resources only need re-copying if they change upstream (new icons, sounds, models, etc.).
@@ -260,11 +260,11 @@ and `bun run tauri build` work normally.
 
 ### Windows `tauri build` fails at bundling with `program not found`
 
-If the build compiles all the way to `Built application at: ...\handy.exe` and
+If the build compiles all the way to `Built application at: ...\verbatap.exe` and
 then fails with:
 
 ```
-Signing C:\...\handy.exe with a custom signing command
+Signing C:\...\verbatap.exe with a custom signing command
 failed to bundle project `program not found`
 ```
 

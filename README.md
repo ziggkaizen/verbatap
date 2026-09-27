@@ -424,7 +424,7 @@ To opt out for GPU selection or debugging tools, fully quit Handy (including the
 
 ```powershell
 $env:HANDY_KEEP_VULKAN_IMPLICIT_LAYERS = "1"
-& "$env:ProgramFiles\Handy\handy.exe"
+& "$env:ProgramFiles\VerbaTap\verbatap.exe"
 ```
 
 Adjust the executable path if needed. This override only applies to apps launched from that PowerShell session, not the Start menu. Handy also preserves any existing `VK_LOADER_LAYERS_DISABLE` value.
