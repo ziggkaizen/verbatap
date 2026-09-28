@@ -512,6 +512,12 @@ jobs:
           chmod +x "$tools_dir/linuxdeploy-${arch}.AppImage"
           "$tools_dir/linuxdeploy-${arch}.AppImage" --appimage-extract-and-run --version
 
+      - name: Disable updater artifacts for unsigned builds
+        if: ${{ !inputs.sign-binaries }}
+        shell: bash
+        run: |
+          bun -e 'const fs=require("fs"); const p="src-tauri/tauri.conf.json"; const c=JSON.parse(fs.readFileSync(p,"utf8")); c.bundle.createUpdaterArtifacts=false; fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");'
+
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@v0
         env:
