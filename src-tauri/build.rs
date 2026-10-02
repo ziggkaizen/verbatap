@@ -39,13 +39,13 @@ fn main() {
 
 /// Stage the MSVC runtime DLLs into `transcribe-libs/` for app-local deployment.
 ///
-/// Handy's native stack links the VC++ runtime dynamically (/MD). Shipping the
+/// VerbaTap's native stack links the VC++ runtime dynamically (/MD). Shipping the
 /// DLLs beside `verbatap.exe` covers machines with no redistributable installed and
 /// machines whose system redist is older than the CI toolset (issue #1527).
 ///
 /// Driven by `HANDY_VC_REDIST_DIRS`, set by CI to the redist dirs from the same
 /// Visual Studio install that compiled the native code. Copies only the runtime
-/// DLL families Handy imports and no-ops when the env var is unset.
+/// DLL families VerbaTap imports and no-ops when the env var is unset.
 fn stage_vc_runtime_dlls() {
     use std::path::PathBuf;
 
@@ -91,7 +91,7 @@ fn stage_vc_runtime_dlls() {
         if !copied.iter().any(|n| n == required) {
             panic!(
                 "HANDY_VC_REDIST_DIRS is set but {required} was not found in it; \
-                 the app-local VC++ runtime would be incomplete and Handy would \
+                 the app-local VC++ runtime would be incomplete and VerbaTap would \
                  crash on machines without a current redist (issue #1527)"
             );
         }

@@ -122,6 +122,12 @@ VerbaTap also uses `gtk-layer-shell` for overlay integration on supported Linux 
 
 Some inherited compatibility environment variables still use the `HANDY_*` prefix. These identifiers are intentionally preserved until a migration strategy is introduced.
 
+## macOS Secure Input
+
+macOS Secure Input can temporarily prevent global keyboard shortcuts from reaching VerbaTap. This commonly happens while a password field is active or when Terminal has **Secure Keyboard Entry** enabled.
+
+If VerbaTap reports that shortcuts are blocked, leave password fields, disable Secure Keyboard Entry in Terminal if enabled, and retry the shortcut. If macOS continues to report Secure Input after the responsible application has closed, logging out or restarting macOS can clear the stale state.
+
 ## Reporting Issues
 
 Please report VerbaTap problems in this repository:
