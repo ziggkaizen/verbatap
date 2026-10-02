@@ -299,7 +299,7 @@ jobs:
           #     statically linking libomp.
           echo "TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF -DGGML_OPENMP=OFF" >> $env:GITHUB_ENV
 
-      # Bundle the VC++ runtime app-local so Handy starts on machines without a
+      # Bundle the VC++ runtime app-local so VerbaTap starts on machines without a
       # current Microsoft redistributable. build.rs stages DLLs from these dirs
       # into transcribe-libs/, using the same VS install that compiled the code.
       # x64 also needs vcomp140.dll for ggml OpenMP; ARM64 disables OpenMP.
@@ -389,7 +389,7 @@ jobs:
               cp -L "$f" "$f.real" && mv "$f.real" "$f"
             fi
           done
-          # Ship ORT in Handy's private lib dir under its SONAME only — the one
+          # Ship ORT in VerbaTap's private lib dir under its SONAME only — the one
           # name the loader resolves (handy has NEEDED libonnxruntime.so.1).
           # Shipping the .so/.so.x.y.z aliases too would triplicate the lib as
           # real files and draw ldconfig warnings (issue #1639).

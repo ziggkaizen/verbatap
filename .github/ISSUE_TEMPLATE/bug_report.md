@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Create a report to help us improve Handy
+about: Report a problem with VerbaTap
 title: "[BUG] "
 labels: ["bug"]
 assignees: ""
@@ -8,30 +8,32 @@ assignees: ""
 
 ## Before You Submit
 
-**Please search [existing issues](https://github.com/cjpais/Handy/issues) to avoid duplicates.** Your bug may already be reported! Right now it's just me maintaining this project so many issues can be overwhelming! Help me out by checking first.
+Please search the existing VerbaTap issues before opening a duplicate.
 
 ## Bug Description
 
-A clear and concise description of what the bug is.
+A clear and concise description of what happened and what you expected to happen.
+
+## Steps to Reproduce
+
+1.
+2.
+3.
 
 ## System Information
 
-**App Version:**
-
-<!-- You can find this in the app settings or about section -->
+**VerbaTap Version:**
 
 **Operating System:**
 
-<!-- e.g., macOS 14.1, Windows 11, Ubuntu 22.04 -->
-
 **CPU:**
-
-<!-- e.g., Apple M2, Intel i7-12700K, AMD Ryzen 7 5800X -->
 
 **GPU:**
 
-<!-- e.g., Apple M2 GPU, NVIDIA RTX 4080, AMD RX 6800 XT, Intel UHD Graphics -->
+**Audio Input Device:**
 
 ## Logs
 
-<!-- Please attach relevant logs to help us diagnose the issue. You can find the log directory by going to Settings > About in the app. -->
+Please attach relevant logs when possible. You can find the log directory under Settings > About.
+
+Remove or redact dictated text, API keys, file paths, or other private information before posting logs.
