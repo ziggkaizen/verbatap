@@ -30,7 +30,11 @@ export const ModelsSidebarIcon: React.FC<SidebarIconProps> = (props) => (
 );
 
 export const AdvancedSidebarIcon: React.FC<SidebarIconProps> = (props) => (
-  <ThemedSidebarIcon {...props} lightSrc={advancedLight} darkSrc={advancedDark} />
+  <ThemedSidebarIcon
+    {...props}
+    lightSrc={advancedLight}
+    darkSrc={advancedDark}
+  />
 );
 
 export const AboutSidebarIcon: React.FC<SidebarIconProps> = (props) => (

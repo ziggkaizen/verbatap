@@ -4,15 +4,15 @@
   /* Palette source of truth. Each themed color is defined once as a
      light/dark pair; the active tokens below and the `data-theme` overrides
      in App.css reference these, so a hex value lives in exactly one place. */
-  --light-color-text: #163B3A;
-  --light-color-background: #F7FAF9;
-  --light-color-logo-primary: #5EEAD4;
-  --light-color-logo-stroke: #0F766E;
+  --light-color-text: #163b3a;
+  --light-color-background: #f7faf9;
+  --light-color-logo-primary: #5eead4;
+  --light-color-logo-stroke: #0f766e;
 
-  --dark-color-text: #E6F6F3;
-  --dark-color-background: #10181D;
-  --dark-color-logo-primary: #0F766E;
-  --dark-color-logo-stroke: #CCFBF1;
+  --dark-color-text: #e6f6f3;
+  --dark-color-background: #10181d;
+  --dark-color-logo-primary: #0f766e;
+  --dark-color-logo-stroke: #ccfbf1;
 
   /* Semantic status colors. First used by SecureInputWarning; intended to
      replace the ad-hoc yellow-500/red-500 usages (e.g. ui/Alert.tsx) over
@@ -23,8 +23,8 @@
   --dark-color-error: #f87171;
 
   /* Tokens that do not change between light and dark */
-  --color-background-ui: #0F766E;
-  --color-text-stroke: #F0FDFA;
+  --color-background-ui: #0f766e;
+  --color-text-stroke: #f0fdfa;
   --color-mid-gray: #808080;
 
   /* Active palette — defaults to light, follows the OS via the media query
