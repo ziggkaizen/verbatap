@@ -4,15 +4,15 @@
   /* Palette source of truth. Each themed color is defined once as a
      light/dark pair; the active tokens below and the `data-theme` overrides
      in App.css reference these, so a hex value lives in exactly one place. */
-  --light-color-text: #0f0f0f;
-  --light-color-background: #fbfbfb;
-  --light-color-logo-primary: #faa2ca;
-  --light-color-logo-stroke: #382731;
+  --light-color-text: #163B3A;
+  --light-color-background: #F7FAF9;
+  --light-color-logo-primary: #5EEAD4;
+  --light-color-logo-stroke: #0F766E;
 
-  --dark-color-text: #fbfbfb;
-  --dark-color-background: #2c2b29;
-  --dark-color-logo-primary: #f28cbb;
-  --dark-color-logo-stroke: #fad1ed;
+  --dark-color-text: #E6F6F3;
+  --dark-color-background: #10181D;
+  --dark-color-logo-primary: #0F766E;
+  --dark-color-logo-stroke: #CCFBF1;
 
   /* Semantic status colors. First used by SecureInputWarning; intended to
      replace the ad-hoc yellow-500/red-500 usages (e.g. ui/Alert.tsx) over
@@ -23,8 +23,8 @@
   --dark-color-error: #f87171;
 
   /* Tokens that do not change between light and dark */
-  --color-background-ui: #da5893;
-  --color-text-stroke: #f6f6f6;
+  --color-background-ui: #0F766E;
+  --color-text-stroke: #F0FDFA;
   --color-mid-gray: #808080;
 
   /* Active palette — defaults to light, follows the OS via the media query
@@ -75,3 +75,43 @@
   --color-warning: var(--dark-color-warning);
   --color-error: var(--dark-color-error);
 }
+/* VERBATAP_THEME_BRANDING_START */
+/*
+ * Theme-aware VerbaTap raster branding.
+ * "for-light" is the dark-teal artwork used on light backgrounds.
+ * "for-dark" is the light/mint artwork used on dark backgrounds.
+ */
+.verbatap-brand-for-light {
+  display: block;
+}
+
+.verbatap-brand-for-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .verbatap-brand-for-light {
+    display: none;
+  }
+
+  :root:not([data-theme]) .verbatap-brand-for-dark {
+    display: block;
+  }
+}
+
+:root[data-theme="light"] .verbatap-brand-for-light {
+  display: block;
+}
+
+:root[data-theme="light"] .verbatap-brand-for-dark {
+  display: none;
+}
+
+:root[data-theme="dark"] .verbatap-brand-for-light {
+  display: none;
+}
+
+:root[data-theme="dark"] .verbatap-brand-for-dark {
+  display: block;
+}
+/* VERBATAP_THEME_BRANDING_END */

@@ -142,7 +142,7 @@ VerbaTap is an independent fork of [Handy](https://github.com/cjpais/Handy), ori
 
 The inherited source code is distributed under the MIT License. The original copyright and license notice are preserved in [LICENSE](LICENSE).
 
-The Handy name, logo, icon, and other Handy brand assets are not licensed for reuse. VerbaTap uses its own product name and is replacing inherited Handy visual assets with VerbaTap-specific assets.
+The Handy name, logo, icon, and other Handy brand assets are not licensed for reuse. VerbaTap uses its own product name and separate VerbaTap-specific visual assets.
 
 VerbaTap is not affiliated with or endorsed by Handy or its maintainers.
 
