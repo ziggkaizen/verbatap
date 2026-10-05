@@ -20,14 +20,18 @@ use tar::Archive;
 use tauri::{AppHandle, Emitter, Manager};
 
 mod download;
+mod package;
+
+pub use package::{ModelArtifact, ModelPackage, ResolvedModelArtifact};
 
 use download::{HttpDownloadOutcome, DOWNLOAD_STALL_TIMEOUT};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 pub enum EngineType {
     /// Any GGML/GGUF model loaded through transcribe-cpp (Whisper, Parakeet,
     /// Voxtral, Qwen3-ASR, Nemotron, …). The architecture is auto-detected from
     /// the file, so this one variant covers the whole transcribe-cpp family.
+    #[default]
     TranscribeCpp,
     Parakeet,
     Moonshine,
@@ -36,6 +40,9 @@ pub enum EngineType {
     GigaAM,
     Canary,
     Cohere,
+    VibeVoiceBitNet,
+    VibeVoiceAsr,
+    VibeVoiceStreaming,
 }
 
 /// Where a model comes from and how VerbaTap obtains it — the routing discriminant
@@ -49,8 +56,9 @@ pub enum ModelSource {
         sha256: Option<String>,
     },
     /// A file inside a Hugging Face Hub repo, fetched via hf-hub into the shared
-    /// HF cache (so other tools reuse it). The file within the repo is
-    /// [`ModelInfo::filename`].
+    /// HF cache (so other tools reuse it). Single-file models use
+    /// [`ModelInfo::filename`]; packages declare every required repo-relative
+    /// filename in [`ModelPackage`].
     HuggingFace { repo_id: String, revision: String },
     /// Already present on disk — a user-provided custom model, or one discovered
     /// in a shared cache. Nothing to download.
@@ -173,6 +181,9 @@ pub struct ModelDescriptor {
     pub engine_type: EngineType,
     pub caps: CapabilityProbe,
     pub files: Vec<QuantFile>,
+    /// Required artifacts installed and selected together. Mutually exclusive
+    /// with `files`, which remain alternative single-file quantizations.
+    pub package: Option<ModelPackage>,
     pub default_quant: Option<String>,
     pub speed_score: f32,
     pub accuracy_score: f32,
@@ -235,13 +246,21 @@ impl ModelDescriptor {
             id,
             name,
             description: self.description.clone(),
-            filename: file.map(|f| f.filename.clone()).unwrap_or_default(),
+            filename: self
+                .package
+                .as_ref()
+                .map(|_| ModelPackage::directory(&self.id))
+                .unwrap_or_else(|| file.map(|f| f.filename.clone()).unwrap_or_default()),
             source: self.source.clone(),
-            size_mb: file.map(|f| f.size_bytes / (1024 * 1024)).unwrap_or(0),
+            size_mb: self
+                .package
+                .as_ref()
+                .map(|p| p.size_bytes() / (1024 * 1024))
+                .unwrap_or_else(|| file.map(|f| f.size_bytes / (1024 * 1024)).unwrap_or(0)),
             is_downloaded: status.is_downloaded,
             is_downloading: status.is_downloading,
             partial_size: status.partial_size,
-            is_directory: false,
+            is_directory: self.package.is_some(),
             engine_type: self.engine_type.clone(),
             accuracy_score: self.accuracy_score,
             speed_score: self.speed_score,
@@ -325,6 +344,26 @@ pub struct DownloadProgress {
     pub percentage: f64,
 }
 
+impl DownloadProgress {
+    /// Fold per-artifact transport bytes into one selectable package's total.
+    fn with_package_progress(&self, package: Option<(u64, u64)>) -> Self {
+        let Some((offset, total)) = package else {
+            return self.clone();
+        };
+        let downloaded = offset.saturating_add(self.downloaded).min(total);
+        Self {
+            model_id: self.model_id.clone(),
+            downloaded,
+            total,
+            percentage: if total > 0 {
+                downloaded as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
 /// Resolve a Hugging Face model file in the shared HF cache, if already present.
 /// Uses hf-hub's stock location (HF_HOME or ~/.cache/huggingface/hub) so
 /// downloads are shared with other tools.
@@ -391,6 +430,7 @@ struct HfDownloadProgress {
     app_handle: AppHandle,
     model_id: String,
     state: Arc<Mutex<HfProgressState>>,
+    package_progress: Option<(u64, u64)>,
 }
 
 struct HfProgressState {
@@ -404,10 +444,11 @@ struct HfProgressState {
 }
 
 impl HfDownloadProgress {
-    fn new(app_handle: AppHandle, model_id: String) -> Self {
+    fn new(app_handle: AppHandle, model_id: String, package_progress: Option<(u64, u64)>) -> Self {
         Self {
             app_handle,
             model_id,
+            package_progress,
             state: Arc::new(Mutex::new(HfProgressState {
                 total: 0,
                 downloaded: 0,
@@ -435,7 +476,8 @@ impl HfDownloadProgress {
                 downloaded,
                 total,
                 percentage,
-            },
+            }
+            .with_package_progress(self.package_progress),
         );
     }
 }
@@ -1381,10 +1423,29 @@ impl ModelManager {
         // two locks are never nested) so a mid-download entry is never dropped.
         let downloading_ids: HashSet<String> =
             self.cancel_flags.lock().unwrap().keys().cloned().collect();
+        // Hash package artifacts off-lock; the registry remains responsive
+        // while large files are verified during refresh.
+        let package_statuses: HashMap<_, _> = crate::catalog::CATALOG
+            .iter()
+            .filter_map(|d| {
+                d.package.as_ref().map(|p| {
+                    (
+                        d.id.clone(),
+                        p.disk_status(&self.models_dir, d, downloading_ids.contains(&d.id)),
+                    )
+                })
+            })
+            .collect();
         let mut models = self.available_models.lock().unwrap();
         let mut vanished_models: Vec<String> = Vec::new();
 
         for model in models.values_mut() {
+            if let Some(status) = package_statuses.get(&model.id) {
+                model.is_downloaded = status.is_downloaded;
+                model.is_downloading = status.is_downloading;
+                model.partial_size = status.partial_size;
+                continue;
+            }
             if let ModelSource::HuggingFace { repo_id, revision } = &model.source {
                 // A models-dir copy counts too: mirror-fallback downloads land
                 // there, and it makes manual drop-ins of catalog files work.
@@ -1811,6 +1872,12 @@ impl ModelManager {
                 // metadata — quant-suffixed name for non-defaults — and skip
                 // the header probe (the catalog is authoritative for its own
                 // models). Everything else keeps the generic probed path.
+                if crate::catalog::CATALOG.iter().any(|d| {
+                    matches!(&d.source, ModelSource::HuggingFace { repo_id: r, .. } if r == &repo_id)
+                        && d.package.as_ref().is_some_and(|p| p.artifacts().iter().any(|a| a.filename == fname))
+                }) {
+                    continue;
+                }
                 if let Some((desc, quant_file)) =
                     crate::catalog::file_in_catalog(&fname, Some(&repo_id))
                 {
@@ -1906,9 +1973,22 @@ impl ModelManager {
 
         // Already in the shared cache (possibly from another tool), or dropped
         // into the models dir (mirror fallback / manual install)? Done.
-        if hf_cached_path(&repo_id, &revision, &filename).is_some()
-            || self.models_dir.join(&filename).exists()
-        {
+        let descriptor = crate::catalog::package_descriptor(&model_id);
+        if descriptor.is_some() && self.cancel_flags.lock().unwrap().contains_key(&model_id) {
+            return Err(anyhow::anyhow!(
+                "Package download is already active: {}",
+                model_id
+            ));
+        }
+        let already_downloaded = if let Some(d) = descriptor {
+            d.package
+                .as_ref()
+                .is_some_and(|p| p.resolve(&self.models_dir, d).is_ok())
+        } else {
+            hf_cached_path(&repo_id, &revision, &filename).is_some()
+                || self.models_dir.join(&filename).exists()
+        };
+        if already_downloaded {
             self.update_download_status()?;
             let _ = self.app_handle.emit("model-download-complete", &model_id);
             return Ok(());
@@ -1919,6 +1999,9 @@ impl ModelManager {
             let mut models = self.available_models.lock().unwrap();
             if let Some(model) = models.get_mut(&model_id) {
                 model.is_downloading = true;
+                if descriptor.is_some() {
+                    model.is_downloaded = false;
+                }
             }
         }
 
@@ -1927,6 +2010,12 @@ impl ModelManager {
         let cancel_token = CancellationToken::new();
         {
             let mut flags = self.cancel_flags.lock().unwrap();
+            if descriptor.is_some() && flags.contains_key(&model_id) {
+                return Err(anyhow::anyhow!(
+                    "Package download is already active: {}",
+                    model_id
+                ));
+            }
             flags.insert(model_id.clone(), cancel_token.clone());
         }
 
@@ -1936,6 +2025,88 @@ impl ModelManager {
             model_id: model_id.clone(),
             disarmed: false,
         };
+
+        if let Some(d) = descriptor {
+            if let Some(package) = &d.package {
+                let mut offset = 0;
+                for artifact in package.artifacts() {
+                    if cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
+                    let local_filename =
+                        format!("{}/{}", ModelPackage::directory(&d.id), artifact.filename);
+                    if !self
+                        .acquire_hf_file(
+                            &model_id,
+                            &artifact.filename,
+                            &repo_id,
+                            &revision,
+                            &cancel_token,
+                            Some(artifact),
+                            &local_filename,
+                            Some((offset, package.size_bytes())),
+                        )
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    offset += artifact.size_bytes;
+                }
+            }
+        } else if !self
+            .acquire_hf_file(
+                &model_id,
+                &filename,
+                &repo_id,
+                &revision,
+                &cancel_token,
+                None,
+                &filename,
+                None,
+            )
+            .await?
+        {
+            return Ok(());
+        }
+
+        if cancel_token.is_cancelled() {
+            return Ok(());
+        }
+        self.cancel_flags.lock().unwrap().remove(&model_id);
+        self.update_download_status()?;
+        if descriptor.is_some() {
+            self.get_model_artifacts(&model_id)?;
+        }
+        cleanup.disarmed = true;
+        let _ = self.app_handle.emit("model-download-complete", &model_id);
+        info!("HF model {} downloaded", model_id);
+        Ok(())
+    }
+
+    /// Shared HF retry/watchdog/mirror transport for a single required file.
+    /// The caller owns model-level cancellation, readiness and completion.
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_hf_file(
+        &self,
+        model_id: &str,
+        filename: &str,
+        repo_id: &str,
+        revision: &str,
+        cancel_token: &CancellationToken,
+        artifact: Option<&ModelArtifact>,
+        local_filename: &str,
+        package_progress: Option<(u64, u64)>,
+    ) -> Result<bool> {
+        if let Some(artifact) = artifact {
+            if hf_cached_path(repo_id, revision, filename).is_some_and(|p| artifact.is_verified(&p))
+                || artifact.is_verified(&self.models_dir.join(local_filename))
+            {
+                return Ok(true);
+            }
+            // An invalid cache entry would make hf-hub return it unchanged.
+            // Remove only this package artifact so it can be acquired again.
+            Self::delete_hf_cache_file(repo_id, revision, filename);
+        }
 
         info!(
             "Downloading HF model {} from {}@{} ({})",
@@ -1976,11 +2147,15 @@ impl ModelManager {
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to init Hugging Face API: {}", e))?;
             let repo = api.repo(Repo::with_revision(
-                repo_id.clone(),
+                repo_id.to_string(),
                 RepoType::Model,
-                revision.clone(),
+                revision.to_string(),
             ));
-            let progress = HfDownloadProgress::new(self.app_handle.clone(), model_id.clone());
+            let progress = HfDownloadProgress::new(
+                self.app_handle.clone(),
+                model_id.to_string(),
+                package_progress,
+            );
 
             // hf-hub has no internal timeouts, so a wedged connection would
             // otherwise hang this attempt forever and neither the retry loop
@@ -2012,7 +2187,7 @@ impl ModelManager {
             // `.sync.part` resume offset), then drop the future outright,
             // which aborts whatever request it was wedged in.
             let mut download = std::pin::pin!(repo.download_with_progress_cancellable(
-                &filename,
+                filename,
                 progress,
                 attempt_token.clone()
             ));
@@ -2028,7 +2203,16 @@ impl ModelManager {
             watchdog.abort();
 
             match result {
-                Ok(_) => break None,
+                Ok(path) => {
+                    if artifact.is_some_and(|a| !a.is_verified(&path)) {
+                        Self::delete_hf_cache_file(repo_id, revision, filename);
+                        break Some(anyhow::anyhow!(
+                            "HF artifact failed integrity verification: {}",
+                            filename
+                        ));
+                    }
+                    break None;
+                }
                 Err(hf_hub::api::tokio::ApiError::Cancelled) if cancel_token.is_cancelled() => {
                     // User cancelled. hf-hub leaves the partially downloaded
                     // `.sync.part` in the shared cache, so a later attempt resumes
@@ -2036,7 +2220,7 @@ impl ModelManager {
                     // drops the token; `cancel_download` already emitted
                     // `model-download-cancelled`.
                     info!("HF download cancelled for: {}", model_id);
-                    return Ok(());
+                    return Ok(false);
                 }
                 Err(hf_hub::api::tokio::ApiError::Cancelled) => {
                     let err = anyhow::anyhow!(
@@ -2065,7 +2249,7 @@ impl ModelManager {
                         _ = tokio::time::sleep(delay) => {}
                         _ = cancel_token.cancelled() => {
                             info!("HF download cancelled for: {}", model_id);
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                     attempt += 1;
@@ -2092,7 +2276,7 @@ impl ModelManager {
                         _ = tokio::time::sleep(delay) => {}
                         _ = cancel_token.cancelled() => {
                             info!("HF download cancelled for: {}", model_id);
-                            return Ok(());
+                            return Ok(false);
                         }
                     }
                     attempt += 1;
@@ -2106,7 +2290,7 @@ impl ModelManager {
                 "HF download failed for {} after {} attempt(s): {:?}",
                 model_id, attempt, hf_error
             );
-            let mirrors = crate::catalog::mirror_fallbacks(&model_id);
+            let mirrors = crate::catalog::mirror_fallbacks_for_file(model_id, filename);
             if mirrors.is_empty() {
                 return Err(anyhow::anyhow!(
                     "Hugging Face download failed after {} attempt(s): {}",
@@ -2118,7 +2302,14 @@ impl ModelManager {
             for mirror in &mirrors {
                 info!("Falling back to mirror for {}: {}", model_id, mirror.url);
                 match self
-                    .download_from_mirror(&model_id, &filename, mirror, cancel_token.clone())
+                    .download_from_mirror(
+                        model_id,
+                        local_filename,
+                        mirror,
+                        cancel_token.clone(),
+                        artifact.is_some(),
+                        package_progress,
+                    )
                     .await
                 {
                     Ok(true) => {
@@ -2127,7 +2318,7 @@ impl ModelManager {
                     }
                     Ok(false) => {
                         info!("Mirror download cancelled for: {}", model_id);
-                        return Ok(());
+                        return Ok(false);
                     }
                     Err(e) => {
                         warn!(
@@ -2146,12 +2337,7 @@ impl ModelManager {
             }
         }
 
-        cleanup.disarmed = true;
-        self.update_download_status()?;
-        self.cancel_flags.lock().unwrap().remove(&model_id);
-        let _ = self.app_handle.emit("model-download-complete", &model_id);
-        info!("HF model {} downloaded", model_id);
-        Ok(())
+        Ok(true)
     }
 
     /// Direct-HTTP download of a catalog model's file from a mirror into the
@@ -2163,13 +2349,24 @@ impl ModelManager {
         filename: &str,
         mirror: &crate::catalog::MirrorFile,
         cancel_token: CancellationToken,
+        verify_existing: bool,
+        package_progress: Option<(u64, u64)>,
     ) -> Result<bool> {
         fs::create_dir_all(&self.models_dir)?;
         let model_path = self.models_dir.join(filename);
         let partial_path = self.models_dir.join(format!("{}.partial", filename));
 
+        if let Some(parent) = model_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         if model_path.exists() {
-            return Ok(true);
+            // Keep legacy single-file behavior. Packages may have a corrupt
+            // final file from a manual install and must reacquire that file.
+            if !verify_existing {
+                return Ok(true);
+            }
+            fs::remove_file(&model_path)?;
         }
 
         match self
@@ -2180,6 +2377,7 @@ impl ModelManager {
                 Some(mirror.size_bytes),
                 Some(&mirror.sha256),
                 &cancel_token,
+                package_progress,
             )
             .await?
         {
@@ -2264,6 +2462,7 @@ impl ModelManager {
                 None,
                 expected_sha256.as_deref(),
                 &cancel_token,
+                None,
             )
             .await?
         {
@@ -2405,6 +2604,21 @@ impl ModelManager {
             model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
         debug!("ModelManager: Found model info: {:?}", model_info);
+
+        if let Some(descriptor) = crate::catalog::package_descriptor(model_id) {
+            let flags = self.cancel_flags.lock().unwrap();
+            if flags.contains_key(model_id) {
+                return Err(anyhow::anyhow!(
+                    "Package download is still active: {}",
+                    model_id
+                ));
+            }
+            ModelPackage::delete_files(&self.models_dir, descriptor)?;
+            drop(flags);
+            self.update_download_status()?;
+            let _ = self.app_handle.emit("model-deleted", model_id);
+            return Ok(());
+        }
 
         if let ModelSource::HuggingFace { repo_id, revision } = &model_info.source {
             let is_alternate_quant =
@@ -2559,7 +2773,36 @@ impl ModelManager {
         let _ = self.app_handle.emit("models-updated", ());
     }
 
+    /// Resolve every required package artifact, retaining its catalog role and
+    /// order. Single-file and legacy directory models retain `get_model_path`.
+    pub fn get_model_artifacts(&self, model_id: &str) -> Result<Vec<ResolvedModelArtifact>> {
+        let info = self
+            .get_model_info(model_id)
+            .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
+        if info.is_downloading || self.cancel_flags.lock().unwrap().contains_key(model_id) {
+            return Err(anyhow::anyhow!(
+                "Model is currently downloading: {}",
+                model_id
+            ));
+        }
+        let descriptor = crate::catalog::package_descriptor(model_id)
+            .ok_or_else(|| anyhow::anyhow!("Model is not an artifact package: {}", model_id))?;
+        let package = descriptor
+            .package
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Model package not found: {}", model_id))?;
+        package
+            .resolve(&self.models_dir, descriptor)
+            .inspect_err(|_| self.mark_model_unavailable(model_id))
+    }
+
     pub fn get_model_path(&self, model_id: &str) -> Result<PathBuf> {
+        if crate::catalog::package_descriptor(model_id).is_some() {
+            return Err(anyhow::anyhow!(
+                "Model package requires artifact path resolution: {}",
+                model_id
+            ));
+        }
         let model_info = self
             .get_model_info(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
@@ -2904,6 +3147,7 @@ mod tests {
             description: "desc".to_string(),
             engine_type: EngineType::TranscribeCpp,
             caps: CapabilityProbe::default(),
+            package: None,
             files: vec![
                 QuantFile {
                     filename: "model-Q4_K_M.gguf".to_string(),
