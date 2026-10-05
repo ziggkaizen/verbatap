@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 
 use crate::managers::model::{
-    default_quant_file, EngineType, ModelDescriptor, ModelSource, QuantFile,
+    default_quant_file, EngineType, ModelDescriptor, ModelPackage, ModelSource, QuantFile,
 };
 use crate::managers::model_capabilities::{CapabilityProbe, Compatibility};
 
@@ -48,11 +48,16 @@ struct CatalogModel {
     name: String,
     description: String,
     architecture: Option<String>,
+    #[serde(default)]
+    engine: EngineType,
     languages: Vec<String>,
     capabilities: CatalogCaps,
     speed_score: Option<f32>,
     accuracy_score: Option<f32>,
+    #[serde(default)]
     files: Vec<QuantFile>,
+    /// All required artifacts, as opposed to alternative quantizations.
+    artifacts: Option<ModelPackage>,
     default_quant: Option<String>,
     recommended_rank: Option<u32>,
     /// Part of the small curated onboarding set (badged "Recommended"). Distinct
@@ -80,7 +85,11 @@ impl From<&CatalogModel> for ModelDescriptor {
             .unwrap_or_default();
 
         ModelDescriptor {
-            id: format!("{}/{}", m.id, default_filename),
+            id: if m.artifacts.is_some() {
+                m.id.clone()
+            } else {
+                format!("{}/{}", m.id, default_filename)
+            },
             source: ModelSource::HuggingFace {
                 repo_id: m.id.clone(),
                 // Acquire at the pin: `resolve/<sha>` is immutable (CDN-friendly)
@@ -90,7 +99,7 @@ impl From<&CatalogModel> for ModelDescriptor {
             },
             name: m.name.clone(),
             description: m.description.clone(),
-            engine_type: EngineType::TranscribeCpp,
+            engine_type: m.engine.clone(),
             caps: CapabilityProbe {
                 verdict: Compatibility::Compatible, // curated org models we ship support for
                 display_name: None,
@@ -102,6 +111,7 @@ impl From<&CatalogModel> for ModelDescriptor {
                 supports_language_detect: Some(m.capabilities.lang_detect),
             },
             files: m.files.clone(),
+            package: m.artifacts.clone(),
             default_quant: m.default_quant.clone(),
             // catalog scores are 0–100; ModelInfo / the UI bars use 0.0–1.0.
             speed_score: m.speed_score.unwrap_or(0.0) / 100.0,
@@ -115,9 +125,34 @@ impl From<&CatalogModel> for ModelDescriptor {
 /// The raw parsed catalog. Kept alive (not consumed) so mirror metadata that
 /// deliberately stays out of [`ModelDescriptor`] can be looked up separately.
 static ROOT: Lazy<CatalogRoot> = Lazy::new(|| {
-    serde_json::from_str(include_str!("catalog.json"))
+    parse_catalog(include_str!("catalog.json"))
         .expect("bundled catalog.json is valid JSON matching the catalog schema")
 });
+
+fn parse_catalog(json: &str) -> Result<CatalogRoot, String> {
+    let root: CatalogRoot = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    for model in &root.models {
+        if model.artifacts.is_none() && model.files.is_empty() {
+            return Err(format!(
+                "{}: model requires quant files or package artifacts",
+                model.id
+            ));
+        }
+        if model.artifacts.is_some() && (!model.files.is_empty() || model.default_quant.is_some()) {
+            return Err(format!(
+                "{}: artifacts cannot be mixed with quant files",
+                model.id
+            ));
+        }
+    }
+    Ok(root)
+}
+
+pub(crate) fn package_descriptor(model_id: &str) -> Option<&'static ModelDescriptor> {
+    CATALOG
+        .iter()
+        .find(|d| d.id == model_id && d.package.is_some())
+}
 
 /// The bundled catalog, parsed once and normalised into descriptors.
 pub static CATALOG: Lazy<Vec<ModelDescriptor>> =
@@ -149,12 +184,41 @@ pub fn mirror_fallbacks(model_id: &str) -> Vec<MirrorFile> {
     }) else {
         return Vec::new();
     };
+    mirror_files(m, &file.filename, file.size_bytes, file.sha256.as_deref())
+}
+
+/// A package artifact has its own trust anchor and mirror key. The model id
+/// identifies the selectable package; it is never an individual artifact id.
+pub(crate) fn mirror_fallbacks_for_file(model_id: &str, filename: &str) -> Vec<MirrorFile> {
+    if let Some(model) = ROOT
+        .models
+        .iter()
+        .find(|m| m.artifacts.is_some() && m.id == model_id)
+    {
+        if let Some(artifact) = model
+            .artifacts
+            .as_ref()
+            .and_then(|p| p.artifacts().iter().find(|a| a.filename == filename))
+        {
+            return mirror_files(model, filename, artifact.size_bytes, Some(&artifact.sha256));
+        }
+        return Vec::new();
+    }
+    mirror_fallbacks(model_id)
+}
+
+fn mirror_files(
+    m: &CatalogModel,
+    filename: &str,
+    size_bytes: u64,
+    sha256: Option<&str>,
+) -> Vec<MirrorFile> {
     let Some(revision) = m.revision.as_deref() else {
         return Vec::new();
     };
     // No hash means no verification means no mirror: never fetch from an
     // untrusted host without the catalog trust anchor.
-    let Some(sha256) = file.sha256.as_deref() else {
+    let Some(sha256) = sha256 else {
         return Vec::new();
     };
     ROOT.mirrors
@@ -165,10 +229,10 @@ pub fn mirror_fallbacks(model_id: &str) -> Vec<MirrorFile> {
                 base.trim_end_matches('/'),
                 m.id,
                 revision,
-                file.filename
+                filename
             ),
             sha256: sha256.to_string(),
-            size_bytes: file.size_bytes,
+            size_bytes,
         })
         .collect()
 }
@@ -223,6 +287,120 @@ mod tests {
     }
 
     #[test]
+    fn catalog_engine_is_declared_or_defaults_to_transcribe_cpp() {
+        let root: serde_json::Value = serde_json::from_str(include_str!("catalog.json")).unwrap();
+        let original = root["models"][0].clone();
+        let model: CatalogModel = serde_json::from_value(original.clone()).unwrap();
+        let legacy = ModelDescriptor::from(&model).to_model_info(&Default::default());
+        assert_eq!(
+            serde_json::to_value(&legacy.engine_type).unwrap(),
+            "TranscribeCpp"
+        );
+
+        let mut explicit = original.clone();
+        explicit["engine"] = "TranscribeCpp".into();
+        let model: CatalogModel = serde_json::from_value(explicit).unwrap();
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::to_value(ModelDescriptor::from(&model).to_model_info(&Default::default()))
+                .unwrap()
+        );
+
+        for engine in ["VibeVoiceBitNet", "VibeVoiceAsr", "VibeVoiceStreaming"] {
+            let mut declared = original.clone();
+            declared["engine"] = engine.into();
+            let model: CatalogModel = serde_json::from_value(declared).unwrap();
+            let info = ModelDescriptor::from(&model).to_model_info(&Default::default());
+            assert_eq!(serde_json::to_value(&info.engine_type).unwrap(), engine);
+        }
+    }
+
+    #[test]
+    fn every_existing_single_file_model_renders_unchanged() {
+        for model in &ROOT.models {
+            let info = ModelDescriptor::from(model).to_model_info(&Default::default());
+            let file = default_quant_file(&model.files, model.default_quant.as_deref()).unwrap();
+            assert_eq!(info.id, format!("{}/{}", model.id, file.filename));
+            assert_eq!(info.filename, file.filename);
+            assert_eq!(info.size_mb, file.size_bytes / (1024 * 1024));
+            assert_eq!(info.name, model.name);
+            assert!(!info.is_directory);
+            assert_eq!(
+                serde_json::to_value(&info.engine_type).unwrap(),
+                "TranscribeCpp"
+            );
+        }
+    }
+
+    fn package_model() -> CatalogModel {
+        serde_json::from_value(serde_json::json!({
+            "id": "org/package", "revision": "pinned", "name": "Package", "description": "test",
+            "engine": "VibeVoiceBitNet", "languages": ["en"],
+            "capabilities": { "streaming": false, "translate": false, "lang_detect": false },
+            "artifacts": [
+                { "role": "encoder", "filename": "encoder.gguf", "size_bytes": 1048576, "sha256": "a".repeat(64) },
+                { "role": "decoder", "filename": "nested/decoder.gguf", "size_bytes": 2097152, "sha256": "b".repeat(64) }
+            ]
+        })).unwrap()
+    }
+
+    #[test]
+    fn catalog_package_renders_as_one_selectable_model_with_total_size() {
+        let descriptor = ModelDescriptor::from(&package_model());
+        let info = descriptor.to_model_info(&Default::default());
+        assert_eq!(info.id, "org/package");
+        assert_eq!(info.name, "Package");
+        assert_eq!(info.size_mb, 3);
+        assert!(info.is_directory);
+        assert!(!info.is_downloaded);
+        assert!(info.filename.starts_with(".packages/"));
+        assert_eq!(
+            info.filename,
+            descriptor.to_model_info(&Default::default()).filename
+        );
+        assert_eq!(descriptor.package.unwrap().artifacts().len(), 2);
+    }
+
+    #[test]
+    fn catalog_package_mirrors_use_each_artifacts_own_hash_size_and_path() {
+        let model = package_model();
+        for artifact in model.artifacts.as_ref().unwrap().artifacts() {
+            let mirrors = mirror_files(
+                &model,
+                &artifact.filename,
+                artifact.size_bytes,
+                Some(&artifact.sha256),
+            );
+            assert_eq!(mirrors.len(), ROOT.mirrors.len());
+            for (mirror, base) in mirrors.iter().zip(&ROOT.mirrors) {
+                assert_eq!(
+                    mirror.url,
+                    format!(
+                        "{}/org/package/pinned/{}",
+                        base.trim_end_matches('/'),
+                        artifact.filename
+                    )
+                );
+                assert_eq!(mirror.sha256, artifact.sha256);
+                assert_eq!(mirror.size_bytes, artifact.size_bytes);
+            }
+        }
+        assert!(mirror_files(&model, "encoder.gguf", 1, None).is_empty());
+    }
+
+    #[test]
+    fn catalog_rejects_mixing_required_artifacts_and_alternative_quants() {
+        let mut root: serde_json::Value =
+            serde_json::from_str(include_str!("catalog.json")).unwrap();
+        root["models"][0]["artifacts"] = serde_json::json!([
+            { "role": "encoder", "filename": "encoder.gguf", "size_bytes": 1, "sha256": "a".repeat(64) }
+        ]);
+        assert!(parse_catalog(&root.to_string()).is_err());
+        root["models"][0]["artifacts"] = serde_json::json!([]);
+        assert!(parse_catalog(&root.to_string()).is_err());
+    }
+
+    #[test]
     fn ids_are_unique() {
         let mut ids: Vec<&str> = CATALOG.iter().map(|d| d.id.as_str()).collect();
         ids.sort_unstable();
@@ -255,16 +433,26 @@ mod tests {
         // networks; a catalog entry without one (missing revision, missing
         // sha256, empty mirrors) silently loses that net.
         for d in CATALOG.iter() {
-            let mirrors = mirror_fallbacks(&d.id);
-            assert!(!mirrors.is_empty(), "{}: no mirror fallbacks", d.id);
-            for m in &mirrors {
-                assert!(
-                    m.sha256.len() == 64,
-                    "{}: mirror entry lacks a sha256",
-                    d.id
-                );
-                assert!(m.size_bytes > 0, "{}: mirror entry lacks a size", d.id);
-                assert!(m.url.starts_with("https://"), "{}: bad url {}", d.id, m.url);
+            let downloads = if let Some(package) = &d.package {
+                package
+                    .artifacts()
+                    .iter()
+                    .map(|a| mirror_fallbacks_for_file(&d.id, &a.filename))
+                    .collect()
+            } else {
+                vec![mirror_fallbacks(&d.id)]
+            };
+            for mirrors in downloads {
+                assert!(!mirrors.is_empty(), "{}: no mirror fallbacks", d.id);
+                for m in &mirrors {
+                    assert!(
+                        m.sha256.len() == 64,
+                        "{}: mirror entry lacks a sha256",
+                        d.id
+                    );
+                    assert!(m.size_bytes > 0, "{}: mirror entry lacks a size", d.id);
+                    assert!(m.url.starts_with("https://"), "{}: bad url {}", d.id, m.url);
+                }
             }
         }
     }
@@ -273,6 +461,7 @@ mod tests {
     fn catalog_architectures_are_known_to_capability_probe() {
         let missing: BTreeSet<&str> = CATALOG
             .iter()
+            .filter(|d| matches!(d.engine_type, EngineType::TranscribeCpp))
             .filter_map(|d| d.caps.architecture.as_deref())
             .filter(|arch| !KNOWN_ARCHES.contains(arch))
             .collect();

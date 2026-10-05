@@ -85,7 +85,7 @@ impl ModelManager {
     }
 
     /// Computes the SHA256 hex digest of a file, reading in 64KB chunks to handle large models.
-    fn compute_sha256(path: &Path) -> Result<String> {
+    pub(super) fn compute_sha256(path: &Path) -> Result<String> {
         let mut file = File::open(path)?;
         let mut hasher = Sha256::new();
         let mut buffer = [0u8; 65536];
@@ -121,6 +121,7 @@ impl ModelManager {
 
     /// [`Self::download_http_resumable_with_events`] wired to the Tauri event
     /// bus — the production entry point.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn download_http_resumable(
         &self,
         model_id: &str,
@@ -129,6 +130,7 @@ impl ModelManager {
         expected_size: Option<u64>,
         expected_sha256: Option<&str>,
         cancel_token: &CancellationToken,
+        package_progress: Option<(u64, u64)>,
     ) -> Result<HttpDownloadOutcome> {
         let app_handle = self.app_handle.clone();
         let id = model_id.to_string();
@@ -141,9 +143,10 @@ impl ModelManager {
             cancel_token,
             &move |event| {
                 let _ = match event {
-                    HttpDownloadEvent::Progress(progress) => {
-                        app_handle.emit("model-download-progress", progress)
-                    }
+                    HttpDownloadEvent::Progress(progress) => app_handle.emit(
+                        "model-download-progress",
+                        progress.with_package_progress(package_progress),
+                    ),
                     HttpDownloadEvent::VerificationStarted => {
                         app_handle.emit("model-verification-started", &id)
                     }

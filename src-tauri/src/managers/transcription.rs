@@ -535,6 +535,17 @@ impl TranscriptionManager {
             return Err(anyhow::anyhow!(error_msg));
         }
 
+        // These identities are catalog infrastructure only. Reject before
+        // resolving a single path or unloading the currently working engine.
+        if matches!(
+            model_info.engine_type,
+            EngineType::VibeVoiceBitNet | EngineType::VibeVoiceAsr | EngineType::VibeVoiceStreaming
+        ) {
+            let error = format!("Engine {:?} is not yet implemented", model_info.engine_type);
+            emit_loading_failed(&error);
+            return Err(anyhow::anyhow!(error));
+        }
+
         let model_path = self
             .model_manager
             .get_model_path(model_id)
@@ -704,6 +715,14 @@ impl TranscriptionManager {
                     anyhow::anyhow!(error_msg)
                 })?;
                 LoadedEngine::Cohere(engine)
+            }
+            EngineType::VibeVoiceBitNet
+            | EngineType::VibeVoiceAsr
+            | EngineType::VibeVoiceStreaming => {
+                return Err(anyhow::anyhow!(
+                    "Engine {:?} is not yet implemented",
+                    model_info.engine_type
+                ));
             }
         };
 
