@@ -1,0 +1,134 @@
+name: Bug Report
+description: Report reproducible incorrect behavior in VerbaTap
+title: "[Bug] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a VerbaTap problem. This form is for **bug intake**, not an implementation contract.
+
+        Please search existing issues first. Remove or redact dictated text, API keys, tokens, personal file paths, and other private information from logs or screenshots.
+
+  - type: checkboxes
+    id: before_submit
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing VerbaTap issues and did not find the same problem already reported.
+          required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: What happened?
+      placeholder: Describe the incorrect behavior as precisely as possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect VerbaTap to do instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Give the smallest reliable sequence that triggers the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Reproducibility
+      options:
+        - Every time
+        - Often
+        - Sometimes
+        - Once so far
+        - Unable to reproduce again
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: VerbaTap version
+      description: Version number, commit, or build identifier if known.
+      placeholder: "e.g. 0.9.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other / unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      description: Select the machine architecture if known.
+      options:
+        - x86_64 / AMD64
+        - ARM64 / AArch64
+        - Other / unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant hardware / environment
+      description: Include only what may matter, such as CPU, GPU, microphone/audio device, desktop environment, display server, or special permissions.
+      placeholder: "Optional unless relevant to the bug."
+
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Regression status
+      options:
+        - Worked in an earlier VerbaTap version/build
+        - Has never worked for me
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / diagnostics
+      description: Paste the smallest relevant excerpt or attach files/screenshots after redacting private information.
+      render: text
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround or additional context
+      description: Optional. Include any workaround, related issue, or context that helps reproduce or scope the bug.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I have removed or redacted dictated text, credentials, tokens, personal paths, and other private information from anything I am posting.
+          required: true

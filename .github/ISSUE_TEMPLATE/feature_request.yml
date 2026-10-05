@@ -1,0 +1,83 @@
+name: Feature Request
+description: Propose a user problem or outcome for VerbaTap to consider
+title: "[Feature] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form captures **feature intake**, not an implementation design. Describe the problem and desired user outcome; you do not need to choose the architecture or implementation.
+
+  - type: checkboxes
+    id: before_submit
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing VerbaTap issues and did not find the same request already open.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / need
+      description: What problem are you trying to solve, or what capability is missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired user outcome
+      description: What should a user be able to accomplish if this is solved?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case / workflow
+      description: Describe a concrete situation where this would be useful.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Relevant platforms
+      description: Select only platforms you know are relevant. Product support scope will be determined during design.
+      multiple: true
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Cross-platform / all supported platforms
+        - Unsure
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Important constraints or considerations
+      description: Optional. Mention privacy/local-only expectations, compatibility needs, accessibility, performance, hardware, workflow, or other constraints that matter to the outcome.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround / alternatives
+      description: Optional. How do you solve this today, if at all?
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Optional. Screenshots, examples, related issues, or other useful context.
+
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Intake acknowledgement
+      options:
+        - label: I understand this request may need discovery/design and may be decomposed into one or more development tasks before implementation.
+          required: true
