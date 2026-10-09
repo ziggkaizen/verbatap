@@ -116,6 +116,74 @@ bun run tauri build
 
 This compiles a release binary and generates platform-specific bundles (deb, rpm, AppImage on Linux; dmg on macOS; msi on Windows).
 
+## VibeASR persistent server build proof (Windows x64 only)
+
+This optional build foundation is separate from `bun run tauri build` and Cargo.
+It does not bundle a sidecar in VerbaTap, enable an engine, or download models.
+The supported proof environment is Windows x64, 64-bit PowerShell 7, Git,
+CMake >= 3.24, Ninja, and **MSYS2 UCRT64 GCC**. Install the signed official
+[MSYS2 distribution](https://www.msys2.org/) first. From PowerShell, install its
+source-backed compiler/runtime packages:
+
+```powershell
+& C:\msys64\usr\bin\pacman.exe -Syu --noconfirm
+# If MSYS2 asks to restart after updating its core, reopen PowerShell and repeat the update.
+& C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
+```
+
+Run the repository-owned build and verification command from the checkout root:
+
+```powershell
+pwsh -NoProfile -File .\scripts\build-vibeasr-windows.ps1 -MingwBin C:\msys64\ucrt64\bin -Ninja C:\msys64\ucrt64\bin\ninja.exe
+```
+
+The script builds official [VibeASR.cpp](https://github.com/microsoft/VibeASR.cpp/tree/c4334009c88060f86cdbbd684b62662f710b6c20)
+at immutable commit `c4334009c88060f86cdbbd684b62662f710b6c20`. Recursive
+submodules use the committed gitlinks, including llama.cpp
+`a2fdadc20285df2dce90402fca9264a93a8eb32f` and its kompute submodule
+`4565194ed7c32d1d2efa32ceab4d3c6cae006306`; no `--remote` or floating branch
+selects the build source. Dirty source checkouts are rejected.
+
+At this revision, the upstream persistent target is named `asr_stream_server`.
+It compiles `src/asr_server.cpp` and retains models across stdin requests.
+The script builds that target and copies its executable as `asr_server.exe`;
+it does not change upstream code or use the one-shot `asr_infer` target.
+Explicit GCC paths and a separate Ninja build directory isolate this build from
+Rust/MSVC. The script restores its process-local `PATH` even on failure and
+never writes global compiler, linker, or Cargo configuration.
+
+Outputs under the ignored `target/vibeasr/windows-x64/` directory are:
+
+- `stage/asr_server.exe` and three app-local runtime DLLs:
+  `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`;
+- `stage/licenses/`: upstream MIT notices, GCC GPLv3/runtime-exception notices,
+  and the winpthreads notice from the installed MSYS2 packages;
+- `build-manifest.json`: exact source/submodule commits, compiler/CMake/Ninja
+  versions, runtime origin directory, and staged-file SHA-256 hashes;
+- `runtime-proof.json`: PE import tables, isolated help output, and loader exit
+  codes with each DLL withheld and then restored.
+
+llama/ggml are statically linked, OpenMP and curl are disabled, and
+`GGML_NATIVE=OFF` avoids selecting the build host's instruction set. The runtime
+DLLs come from the same MSYS2 installation as GCC, with published
+[package build recipes](https://github.com/msys2/MINGW-packages). This is a
+repeatable pinned-source build contract, not a claim of byte-identical outputs
+across toolchain versions or inference support on every x64 CPU.
+
+The verifier checks the executable and every staged DLL's x64 PE imports against
+the app-local files and an explicit Windows-system allowlist. It actually runs
+`asr_server.exe --help` in the staged directory with child `PATH` containing only
+`System32` and the Windows directory. Each runtime DLL is temporarily withheld;
+the verifier requires `STATUS_DLL_NOT_FOUND` (`0xC0000135`) for each, restores it
+in `finally`, then verifies successful launch again. A globally installed runtime
+that masks a missing staged DLL therefore fails the proof. No model is loaded.
+
+The non-release `VibeASR Windows x64 proof` workflow repeats this command on
+Windows x64 PR/main builds affecting these scripts and uploads the stage and
+evidence as a CI proof artifact. Existing app build/release workflows remain
+independent. ARM64, macOS, Linux, ASR inference, installation, and production
+release are outside this proof.
+
 ## Linux Install (from source)
 
 The raw binary (`src-tauri/target/release/verbatap`) cannot run standalone — it needs Tauri resource files (tray icons, sounds, VAD model) to be co-located at the expected path.

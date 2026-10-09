@@ -1,0 +1,72 @@
+# Opt-in build foundation: separate from the application's Rust/MSVC and release jobs.
+name: VibeASR Windows x64 proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "scripts/build-vibeasr-windows.ps1"
+      - "scripts/test-vibeasr-runtime.ps1"
+      - ".github/workflows/vibeasr-windows.yml"
+      - "BUILD.md"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/build-vibeasr-windows.ps1"
+      - "scripts/test-vibeasr-runtime.ps1"
+      - ".github/workflows/vibeasr-windows.yml"
+      - "BUILD.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-launch:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: msys2/setup-msys2@v2
+        id: msys2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Build, stage and prove isolated launch
+        shell: pwsh
+        env:
+          MSYS2_ROOT: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $names = @('PATH', 'CC', 'CXX', 'CARGO_BUILD_TARGET', 'CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')
+          $before = @{}
+          foreach ($name in $names) { $before[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          try {
+            & ./scripts/build-vibeasr-windows.ps1 -MingwBin "$env:RUNNER_TEMP/missing-mingw"
+            throw 'Missing compiler was accepted.'
+          } catch {
+            if ($_.Exception.Message -notmatch 'Install MSYS2.*gcc') { throw }
+          }
+          & ./scripts/build-vibeasr-windows.ps1 -MingwBin "$env:MSYS2_ROOT/ucrt64/bin" -Ninja "$env:MSYS2_ROOT/ucrt64/bin/ninja.exe"
+          foreach ($name in $names) {
+            if ([Environment]::GetEnvironmentVariable($name, 'Process') -cne $before[$name]) {
+              throw "Application toolchain environment changed: $name"
+            }
+          }
+
+      - name: Upload proof artifact (not a production bundle)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibeasr-windows-x64-proof
+          path: |
+            target/vibeasr/windows-x64/stage/
+            target/vibeasr/windows-x64/build-manifest.json
+            target/vibeasr/windows-x64/runtime-proof.json
+          if-no-files-found: error
