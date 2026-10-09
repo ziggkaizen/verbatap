@@ -14,6 +14,10 @@ const READY_SENTINEL: &str = "---READY---";
 const END_SENTINEL: &str = "---END---";
 const STDERR_DIAGNOSTIC_LIMIT: usize = 16 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// The pinned server reads stdin with fgets(line_buf, 4096, stdin), so one read
+// accepts at most 4095 bytes including the line terminator.
+const SERVER_STDIN_BUFFER_BYTES: usize = 4096;
+const MAX_AUDIO_PATH_BYTES: usize = SERVER_STDIN_BUFFER_BYTES - 2;
 
 /// Configuration for starting one persistent VibeASR server process.
 #[derive(Clone, Debug)]
@@ -187,21 +191,48 @@ impl VibeAsrProcessClient {
         if path_text.contains(['\r', '\n']) || matches!(path_text, "EXIT" | "exit" | "quit") {
             return Err(self.error("audio path conflicts with the VibeASR line protocol"));
         }
-
-        let write_result = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "child stdin is closed"))
-            .and_then(|stdin| {
-                stdin.write_all(path_text.as_bytes())?;
-                stdin.write_all(b"\n")?;
-                stdin.flush()
-            });
-        if let Err(error) = write_result {
-            return Err(self.fail(format!("failed to send VibeASR request: {error}")));
+        if path_text.len() > MAX_AUDIO_PATH_BYTES {
+            return Err(self.error(format!(
+                "audio path exceeds the VibeASR stdin limit of {MAX_AUDIO_PATH_BYTES} UTF-8 bytes"
+            )));
         }
 
         let deadline = Instant::now() + self.config.request_timeout;
+        let Some(mut stdin) = self.stdin.take() else {
+            return Err(self.fail("failed to send VibeASR request: child stdin is closed"));
+        };
+        let mut request_line = Vec::with_capacity(path_text.len() + 1);
+        request_line.extend_from_slice(path_text.as_bytes());
+        request_line.push(b'\n');
+
+        // Pipe writes can block indefinitely, so move the owned pipe to a worker
+        // and bound both sending and receiving by the same request deadline.
+        let writer = thread::spawn(move || {
+            let result = stdin.write_all(&request_line).and_then(|()| stdin.flush());
+            (stdin, result)
+        });
+        loop {
+            if writer.is_finished() {
+                match writer.join() {
+                    Ok((returned_stdin, Ok(()))) => self.stdin = Some(returned_stdin),
+                    Ok((_returned_stdin, Err(error))) => {
+                        return Err(self.fail(format!("failed to send VibeASR request: {error}")));
+                    }
+                    Err(_) => return Err(self.fail("VibeASR request writer thread panicked")),
+                }
+                break;
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // Killing the child closes the pipe and releases a blocked writer.
+                let _ = self.child.kill();
+                let _ = writer.join();
+                return Err(self.fail("VibeASR request timed out while sending request"));
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
+        }
+
         let mut payload_lines = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -491,6 +522,11 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
+    #[cfg(target_os = "linux")]
+    use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::{AsRawFd, FromRawFd};
+
     static FIXTURE: OnceLock<(TempDir, PathBuf)> = OnceLock::new();
 
     /// Compiles the protocol fixture once for all process-boundary tests.
@@ -527,17 +563,12 @@ mod tests {
     fn fixture_paths(directory: &Path, mode: &str) -> (PathBuf, PathBuf, PathBuf) {
         let path_directory = directory.join("paths with spaces ø & $(no-injection)");
         std::fs::create_dir_all(&path_directory).expect("create Unicode fixture paths");
-        let executable_directory = path_directory.join("executables Ω");
-        std::fs::create_dir_all(&executable_directory)
-            .expect("create fixture executable directory");
         let executable = fixture_executable();
-        let copied_executable = executable_directory.join(executable.file_name().unwrap());
-        std::fs::copy(executable, &copied_executable).expect("copy fixture into Unicode path");
         let vae_model = path_directory.join("VAE model café.gguf");
         let lm_model = path_directory.join(format!("{mode} model 语言.gguf"));
         std::fs::write(&vae_model, b"fixture model").expect("create VAE model placeholder");
         std::fs::write(&lm_model, b"fixture model").expect("create LM model placeholder");
-        (copied_executable, vae_model, lm_model)
+        (executable.to_path_buf(), vae_model, lm_model)
     }
 
     /// Builds a client configuration with short deterministic test timeouts.
@@ -551,6 +582,20 @@ mod tests {
             request_timeout: Duration::from_millis(500),
             shutdown_timeout: Duration::from_millis(500),
         }
+    }
+
+    /// Verifies every test client executes the same compiled, immutable fixture binary.
+    #[test]
+    fn fixture_clients_reuse_one_compiled_executable() {
+        let first_directory = tempfile::tempdir().expect("first test temp directory");
+        let second_directory = tempfile::tempdir().expect("second test temp directory");
+
+        let first = config(first_directory.path(), "normal").executable_path;
+        let second = config(second_directory.path(), "normal").executable_path;
+
+        assert_eq!(first, second);
+        assert!(first.to_string_lossy().contains('Ω'));
+        assert!(first.to_string_lossy().contains(' '));
     }
 
     /// Verifies exact readiness, multiline responses, Unicode paths, reuse, and graceful reaping.
@@ -575,6 +620,71 @@ mod tests {
         assert_eq!(second, first);
         client.shutdown().expect("graceful shutdown");
         assert_process_stopped(process_id);
+    }
+
+    /// Verifies UTF-8 byte lengths at the pinned server's stdin buffer boundary.
+    #[test]
+    fn request_enforces_upstream_stdin_line_limit_in_bytes() {
+        let directory = tempfile::tempdir().expect("test temp directory");
+        let mut client =
+            VibeAsrProcessClient::start(config(directory.path(), "normal")).expect("start fixture");
+        let maximum_path = PathBuf::from("ø".repeat(2047));
+        let oversized_path = PathBuf::from("ø".repeat(2048));
+        assert_eq!(maximum_path.to_str().unwrap().len(), 4094);
+
+        assert!(client.request(&maximum_path).is_ok());
+        let error = client
+            .request(&oversized_path)
+            .expect_err("a path that cannot fit with its newline must be rejected");
+        assert!(error.to_string().contains("4094 UTF-8 bytes"));
+        assert!(client.request("after-limit.wav").is_ok());
+    }
+
+    /// Verifies a blocked Linux stdin pipe cannot extend a request past its deadline.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blocked_stdin_write_obeys_request_timeout() {
+        let directory = tempfile::tempdir().expect("test temp directory");
+        let mut client = VibeAsrProcessClient::start(config(directory.path(), "no-read"))
+            .expect("start fixture that leaves stdin unread");
+        client.config.request_timeout = Duration::from_millis(100);
+        let process_id = client.child.id();
+
+        let stdin = client.stdin.as_ref().expect("child stdin pipe");
+        // SAFETY: The descriptor belongs to this live child's anonymous stdin pipe.
+        let pipe_size = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
+        assert_eq!(pipe_size, 4096, "shrink fixture pipe to one page");
+        // SAFETY: dup creates a separate owned descriptor for filling the same pipe.
+        let duplicate_fd = unsafe { libc::dup(stdin.as_raw_fd()) };
+        assert!(duplicate_fd >= 0, "duplicate fixture stdin descriptor");
+        // SAFETY: duplicate_fd is a valid descriptor returned by dup and is owned here.
+        let mut filler = unsafe { std::fs::File::from_raw_fd(duplicate_fd) };
+        filler
+            .write_all(&vec![b'x'; pipe_size as usize])
+            .expect("fill stdin pipe while fixture does not read");
+        drop(filler);
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let request_thread = std::thread::spawn(move || {
+            result_sender
+                .send(client.request("blocked-write.wav"))
+                .expect("send blocked-write result");
+        });
+        let result = result_receiver.recv_timeout(Duration::from_millis(500));
+        if result.is_err() {
+            // SAFETY: process_id is the child started above; this is test cleanup only.
+            unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
+        let error = result
+            .unwrap_or_else(|_| {
+                result_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("request must unblock when the fixture is killed")
+            })
+            .expect_err("blocked stdin write must time out");
+        request_thread.join().expect("join request thread");
+
+        assert!(error.to_string().contains("request timed out"));
     }
 
     /// Verifies startup EOF returns an error containing bounded child diagnostics.

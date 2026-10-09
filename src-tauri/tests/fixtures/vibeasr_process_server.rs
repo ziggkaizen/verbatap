@@ -55,6 +55,10 @@ fn main() {
 
     println!("---READY---");
     io::stdout().flush().expect("flush readiness");
+    if mode.contains("no-read") {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
     if mode.contains("exit-after-ready") {
         return;
     }
