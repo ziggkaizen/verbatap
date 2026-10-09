@@ -54,7 +54,14 @@ foreach ($tool in @('git.exe', 'cmake.exe', $Ninja)) {
 }
 $Ninja = (Get-Command $Ninja -CommandType Application).Source
 $licenseRoot = [IO.Path]::GetFullPath((Join-Path $MingwBin '../share/licenses'))
-$runtimeLicenses = @('gcc-libs/COPYING3', 'gcc-libs/COPYING.RUNTIME', 'winpthreads/COPYING')
+# MSYS2 split the runtime packages in GCC 16; retain the installed GCC 13 layout too.
+$gccLicensePackages = @('libgcc', 'libstdc++')
+if (!(Test-Path -LiteralPath (Join-Path $licenseRoot 'libgcc'))) { $gccLicensePackages = @('gcc-libs') }
+$pthreadPackage = if (Test-Path -LiteralPath (Join-Path $licenseRoot 'libwinpthread')) { 'libwinpthread' } else { 'winpthreads' }
+$runtimeLicenses = @(
+    foreach ($package in $gccLicensePackages) { "$package/COPYING3"; "$package/COPYING.RUNTIME" }
+    "$pthreadPackage/COPYING"
+)
 foreach ($license in $runtimeLicenses) {
     if (!(Test-Path -LiteralPath (Join-Path $licenseRoot $license))) {
         throw "Missing MSYS2 runtime license: $licenseRoot/$license. Use the documented UCRT64 packages."
