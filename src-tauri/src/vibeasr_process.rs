@@ -198,39 +198,24 @@ impl VibeAsrProcessClient {
         }
 
         let deadline = Instant::now() + self.config.request_timeout;
-        let Some(mut stdin) = self.stdin.take() else {
+        let Some(stdin) = self.stdin.take() else {
             return Err(self.fail("failed to send VibeASR request: child stdin is closed"));
         };
         let mut request_line = Vec::with_capacity(path_text.len() + 1);
         request_line.extend_from_slice(path_text.as_bytes());
         request_line.push(b'\n');
 
-        // Pipe writes can block indefinitely, so move the owned pipe to a worker
-        // and bound both sending and receiving by the same request deadline.
-        let writer = thread::spawn(move || {
-            let result = stdin.write_all(&request_line).and_then(|()| stdin.flush());
-            (stdin, result)
-        });
-        loop {
-            if writer.is_finished() {
-                match writer.join() {
-                    Ok((returned_stdin, Ok(()))) => self.stdin = Some(returned_stdin),
-                    Ok((_returned_stdin, Err(error))) => {
-                        return Err(self.fail(format!("failed to send VibeASR request: {error}")));
-                    }
-                    Err(_) => return Err(self.fail("VibeASR request writer thread panicked")),
-                }
-                break;
+        match write_child_stdin_until(stdin, request_line, deadline, &mut self.child) {
+            Ok(stdin) => self.stdin = Some(stdin),
+            Err(ChildInputWriteError::Io(error)) => {
+                return Err(self.fail(format!("failed to send VibeASR request: {error}")));
             }
-
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                // Killing the child closes the pipe and releases a blocked writer.
-                let _ = self.child.kill();
-                let _ = writer.join();
+            Err(ChildInputWriteError::TimedOut) => {
                 return Err(self.fail("VibeASR request timed out while sending request"));
             }
-            thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
+            Err(ChildInputWriteError::WriterPanicked) => {
+                return Err(self.fail("VibeASR request writer thread panicked"));
+            }
         }
 
         let mut payload_lines = Vec::new();
@@ -352,10 +337,23 @@ impl VibeAsrProcessClient {
             .is_none()
         {
             if request_graceful_exit {
-                if let Some(stdin) = self.stdin.as_mut() {
-                    let _ = stdin.write_all(b"EXIT\n").and_then(|_| stdin.flush());
+                let shutdown_deadline = Instant::now() + self.config.shutdown_timeout;
+                if let Some(stdin) = self.stdin.take() {
+                    match write_child_stdin_until(
+                        stdin,
+                        b"EXIT\n".to_vec(),
+                        shutdown_deadline,
+                        &mut self.child,
+                    ) {
+                        Ok(stdin) => self.stdin = Some(stdin),
+                        Err(ChildInputWriteError::TimedOut) => forced = true,
+                        Err(ChildInputWriteError::Io(_) | ChildInputWriteError::WriterPanicked) => {
+                            // Preserve shutdown's bounded wait when EXIT cannot be sent.
+                        }
+                    }
                 }
-                if !wait_for_exit(&mut self.child, self.config.shutdown_timeout)? {
+                let remaining = shutdown_deadline.saturating_duration_since(Instant::now());
+                if forced || !wait_for_exit(&mut self.child, remaining)? {
                     terminate_child(&mut self.child)?;
                     forced = true;
                 }
@@ -384,6 +382,49 @@ enum StdoutEvent {
     Line(String),
     Closed,
     ReadError(String),
+}
+
+/// Describes why a bounded child-stdin write could not complete normally.
+enum ChildInputWriteError {
+    /// The pipe rejected the write or flush operation.
+    Io(io::Error),
+    /// The deadline expired before the pipe write finished.
+    TimedOut,
+    /// The worker thread panicked while writing to the pipe.
+    WriterPanicked,
+}
+
+/// Writes bytes to child stdin without allowing a full pipe to exceed its deadline.
+fn write_child_stdin_until(
+    stdin: ChildStdin,
+    bytes: Vec<u8>,
+    deadline: Instant,
+    child: &mut Child,
+) -> Result<ChildStdin, ChildInputWriteError> {
+    let writer = thread::spawn(move || {
+        let mut stdin = stdin;
+        let result = stdin.write_all(&bytes).and_then(|()| stdin.flush());
+        (stdin, result)
+    });
+
+    loop {
+        if writer.is_finished() {
+            return match writer.join() {
+                Ok((stdin, Ok(()))) => Ok(stdin),
+                Ok((_stdin, Err(error))) => Err(ChildInputWriteError::Io(error)),
+                Err(_) => Err(ChildInputWriteError::WriterPanicked),
+            };
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // Terminating the child closes its read end and releases a blocked writer.
+            let _ = child.kill();
+            let _ = writer.join();
+            return Err(ChildInputWriteError::TimedOut);
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL.min(remaining));
+    }
 }
 
 /// Retains only the most recent bounded stderr bytes.
@@ -649,20 +690,7 @@ mod tests {
             .expect("start fixture that leaves stdin unread");
         client.config.request_timeout = Duration::from_millis(100);
         let process_id = client.child.id();
-
-        let stdin = client.stdin.as_ref().expect("child stdin pipe");
-        // SAFETY: The descriptor belongs to this live child's anonymous stdin pipe.
-        let pipe_size = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
-        assert_eq!(pipe_size, 4096, "shrink fixture pipe to one page");
-        // SAFETY: dup creates a separate owned descriptor for filling the same pipe.
-        let duplicate_fd = unsafe { libc::dup(stdin.as_raw_fd()) };
-        assert!(duplicate_fd >= 0, "duplicate fixture stdin descriptor");
-        // SAFETY: duplicate_fd is a valid descriptor returned by dup and is owned here.
-        let mut filler = unsafe { std::fs::File::from_raw_fd(duplicate_fd) };
-        filler
-            .write_all(&vec![b'x'; pipe_size as usize])
-            .expect("fill stdin pipe while fixture does not read");
-        drop(filler);
+        fill_child_stdin_pipe(&client);
 
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
         let request_thread = std::thread::spawn(move || {
@@ -685,6 +713,98 @@ mod tests {
         request_thread.join().expect("join request thread");
 
         assert!(error.to_string().contains("request timed out"));
+    }
+
+    /// Verifies shutdown bounds EXIT writes and reaps a child behind a full stdin pipe.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shutdown_with_full_stdin_pipe_is_bounded_and_reaps_child() {
+        let directory = tempfile::tempdir().expect("test temp directory");
+        let mut client = VibeAsrProcessClient::start(config(directory.path(), "no-read"))
+            .expect("start fixture that leaves stdin unread");
+        client.config.shutdown_timeout = Duration::from_millis(100);
+        let process_id = client.child.id();
+        fill_child_stdin_pipe(&client);
+
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let shutdown_thread = std::thread::spawn(move || {
+            result_sender
+                .send(client.shutdown())
+                .expect("send shutdown result");
+        });
+        let result = result_receiver.recv_timeout(Duration::from_millis(750));
+        let completed_before_watchdog = result.is_ok();
+        if !completed_before_watchdog {
+            // SAFETY: process_id is the child started above; this is test cleanup only.
+            unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
+        let shutdown_result = result.unwrap_or_else(|_| {
+            result_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("shutdown must unblock when the fixture is killed")
+        });
+        shutdown_thread.join().expect("join shutdown thread");
+
+        assert!(
+            completed_before_watchdog,
+            "shutdown must enforce its deadline without external termination"
+        );
+        let error = shutdown_result.expect_err("full stdin pipe must force child termination");
+        assert!(error.to_string().contains("shutdown timed out"));
+        assert_process_stopped(process_id);
+    }
+
+    /// Verifies Drop bounds EXIT writes and reaps a child behind a full stdin pipe.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_client_with_full_stdin_pipe_is_bounded_and_reaps_child() {
+        let directory = tempfile::tempdir().expect("test temp directory");
+        let mut client = VibeAsrProcessClient::start(config(directory.path(), "no-read"))
+            .expect("start fixture that leaves stdin unread");
+        client.config.shutdown_timeout = Duration::from_millis(100);
+        let process_id = client.child.id();
+        fill_child_stdin_pipe(&client);
+
+        let (completion_sender, completion_receiver) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(client);
+            completion_sender.send(()).expect("send drop completion");
+        });
+        let completion = completion_receiver.recv_timeout(Duration::from_millis(750));
+        let completed_before_watchdog = completion.is_ok();
+        if !completed_before_watchdog {
+            // SAFETY: process_id is the child started above; this is test cleanup only.
+            unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
+        if !completed_before_watchdog {
+            completion_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("Drop must unblock when the fixture is killed");
+        }
+        drop_thread.join().expect("join drop thread");
+
+        assert!(
+            completed_before_watchdog,
+            "Drop must enforce the shutdown deadline without external termination"
+        );
+        assert_process_stopped(process_id);
+    }
+
+    /// Shrinks and fills a Linux child-stdin pipe while its fixture process is not reading.
+    #[cfg(target_os = "linux")]
+    fn fill_child_stdin_pipe(client: &VibeAsrProcessClient) {
+        let stdin = client.stdin.as_ref().expect("child stdin pipe");
+        // SAFETY: The descriptor belongs to this live child's anonymous stdin pipe.
+        let pipe_size = unsafe { libc::fcntl(stdin.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };
+        assert_eq!(pipe_size, 4096, "shrink fixture pipe to one page");
+        // SAFETY: dup creates a separate owned descriptor for filling the same pipe.
+        let duplicate_fd = unsafe { libc::dup(stdin.as_raw_fd()) };
+        assert!(duplicate_fd >= 0, "duplicate fixture stdin descriptor");
+        // SAFETY: duplicate_fd is a valid descriptor returned by dup and is owned here.
+        let mut filler = unsafe { std::fs::File::from_raw_fd(duplicate_fd) };
+        filler
+            .write_all(&vec![b'x'; pipe_size as usize])
+            .expect("fill stdin pipe while fixture does not read");
     }
 
     /// Verifies startup EOF returns an error containing bounded child diagnostics.
